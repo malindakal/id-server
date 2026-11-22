@@ -14,9 +14,12 @@ import {
   deleteFromR2,
   listR2Files,
   createR2Folders,
+  getObjectFromR2,
   R2_CONFIG,
   R2_FOLDERS,
   checkR2Connection,
+  ALLOWED_PROFILE_PICTURE_MIMES,
+  isAllowedProfilePictureMime,
 } from './config/r2';
 
 dotenv.config();
@@ -148,6 +151,41 @@ app.post('/api/storage/init-folders', async (_req: Request, res: Response, next:
   }
 });
 
+// Stream/serve file directly from Cloudflare R2
+app.get(['/api/storage/file/:folder/:fileName', '/api/storage/file/*'], async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rawParam = (req.params as any)[0];
+    const key = rawParam || (req.params.folder && req.params.fileName ? `${req.params.folder}/${req.params.fileName}` : '');
+    if (!key) {
+      res.status(400).json({ error: 'File key is required' });
+      return;
+    }
+    const object = await getObjectFromR2(key);
+
+    if (object.ContentType) {
+      res.setHeader('Content-Type', object.ContentType);
+    }
+    if (object.ContentLength) {
+      res.setHeader('Content-Length', object.ContentLength);
+    }
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+
+    if (object.Body) {
+      const stream = object.Body as import('stream').Readable;
+      stream.pipe(res);
+    } else {
+      res.status(404).json({ error: 'File body empty' });
+    }
+  } catch (err: any) {
+    if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+      res.status(404).json({ error: 'File not found in storage' });
+    } else {
+      console.error('Error serving file from R2:', err.message || err);
+      res.status(500).json({ error: 'Failed to retrieve file from storage' });
+    }
+  }
+});
+
 // Upload profile photo into 'profile-pictures' folder
 app.post(
   '/api/storage/upload-avatar',
@@ -159,8 +197,10 @@ app.post(
         return;
       }
 
-      if (!req.file.mimetype.startsWith('image/')) {
-        res.status(400).json({ error: 'File must be an image.' });
+      if (!isAllowedProfilePictureMime(req.file.mimetype)) {
+        res.status(400).json({
+          error: 'Only PNG and JPEG file types are allowed for profile pictures (image/png, image/jpeg).',
+        });
         return;
       }
 
@@ -170,15 +210,20 @@ app.post(
         req.file.mimetype
       );
 
+      const host = req.get('host') || `localhost:${PORT}`;
+      const protocol = req.protocol || 'http';
+      const streamUrl = `${protocol}://${host}/api/storage/file/${result.key}`;
+
       // If user ID provided, sync avatar URL in MongoDB
       const userId = req.body.userId;
       if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-        await User.findByIdAndUpdate(userId, { avatar: result.url });
+        await User.findByIdAndUpdate(userId, { avatar: streamUrl });
       }
 
       res.status(201).json({
         message: 'Profile picture uploaded to Cloudflare R2 (profile-pictures folder)',
-        avatarUrl: result.url,
+        avatarUrl: streamUrl,
+        publicR2Url: result.url,
         data: result,
       });
     } catch (error) {
@@ -228,6 +273,13 @@ app.post(
       const folder = (req.body.folder as string) === R2_FOLDERS.PROFILE_PICTURES
         ? R2_FOLDERS.PROFILE_PICTURES
         : R2_FOLDERS.DOCUMENTS;
+
+      if (folder === R2_FOLDERS.PROFILE_PICTURES && !isAllowedProfilePictureMime(req.file.mimetype)) {
+        res.status(400).json({
+          error: 'Only PNG and JPEG file types are allowed for profile pictures (image/png, image/jpeg).',
+        });
+        return;
+      }
 
       const result = await uploadToR2(
         req.file.buffer,

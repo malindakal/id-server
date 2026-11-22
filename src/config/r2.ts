@@ -1,6 +1,7 @@
 import {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
   DeleteObjectCommand,
   ListObjectsV2Command,
   HeadBucketCommand,
@@ -29,6 +30,13 @@ export const R2_FOLDERS = {
 } as const;
 
 export type R2FolderType = typeof R2_FOLDERS[keyof typeof R2_FOLDERS];
+
+// Allowed MIME types for profile pictures (PNG and JPEG only)
+export const ALLOWED_PROFILE_PICTURE_MIMES = ['image/png', 'image/jpeg', 'image/jpg'] as const;
+
+export const isAllowedProfilePictureMime = (mimeType: string): boolean => {
+  return ALLOWED_PROFILE_PICTURE_MIMES.includes(mimeType.toLowerCase() as any);
+};
 
 // Initialize S3 Client targeting Cloudflare R2
 export const r2Client = new S3Client({
@@ -217,4 +225,15 @@ export const checkR2Connection = async (): Promise<boolean> => {
   } catch {
     return false;
   }
+};
+
+/**
+ * Get an object stream directly from Cloudflare R2
+ */
+export const getObjectFromR2 = async (key: string) => {
+  const command = new GetObjectCommand({
+    Bucket: R2_CONFIG.bucketName,
+    Key: key,
+  });
+  return r2Client.send(command);
 };
